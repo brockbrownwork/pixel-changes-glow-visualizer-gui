@@ -6,6 +6,9 @@ This tool takes a folder of sequential PNG frames (e.g. extracted from a video),
 - **Non-moving pixels** accumulate age each frame.
 - Output color is based on age (a heatmap-like HSV mapping), producing a ghosting trail effect over time.
 
+<img width="1440" height="1080" alt="output_005188" src="https://github.com/user-attachments/assets/aada61cb-8542-4886-8da9-1820fb75f3bb" />
+
+
 ---
 
 ## Requirements
