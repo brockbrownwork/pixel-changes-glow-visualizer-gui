@@ -17,6 +17,7 @@ from motion_ghosting import (
     detect_hwaccel,
     detect_gpu_encoder,
     _hwaccel_decode_flags,
+    HAS_CUPY,
 )
 
 PREVIEW_WIDTH = 320
@@ -59,6 +60,7 @@ def _extract_frames(video_path, frames_dir, log, gpu=True):
         *hwaccel,
         "-i", str(video_path),
         "-vsync", "0",
+        "-pix_fmt", "gray",
         str(frames_dir / "frame_%06d.bmp"),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -169,7 +171,8 @@ class App(tk.Tk):
         self.gpu_var = tk.BooleanVar(value=True)
         hwaccel = detect_hwaccel()
         gpu_encoder = detect_gpu_encoder()
-        gpu_desc = f"Decode: {hwaccel or 'none'} | Encode: {gpu_encoder}"
+        compute = "cupy" if HAS_CUPY else "numpy"
+        gpu_desc = f"Decode: {hwaccel or 'none'} | Encode: {gpu_encoder} | Compute: {compute}"
         ttk.Checkbutton(
             param_frame, text="GPU acceleration", variable=self.gpu_var,
         ).grid(row=gpu_row, column=0, columnspan=2, sticky="w")

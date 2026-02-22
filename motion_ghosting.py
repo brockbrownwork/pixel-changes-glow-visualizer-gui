@@ -8,6 +8,35 @@ import subprocess
 import numpy as np
 from PIL import Image
 
+try:
+    import cupy
+    HAS_CUPY = True
+except ImportError:
+    HAS_CUPY = False
+
+
+def _xp(gpu=True):
+    """Return cupy when available and requested, else numpy."""
+    if gpu and HAS_CUPY:
+        return cupy
+    return np
+
+
+def _asnumpy(arr):
+    """Ensure array is on CPU (no-op if already numpy)."""
+    if HAS_CUPY and isinstance(arr, cupy.ndarray):
+        return cupy.asnumpy(arr)
+    return np.asarray(arr)
+
+
+def _get_xp(*arrays):
+    """Infer the array module from input arrays."""
+    if HAS_CUPY:
+        for a in arrays:
+            if isinstance(a, cupy.ndarray):
+                return cupy
+    return np
+
 
 # ── GPU / hwaccel helpers ────────────────────────────────────────────
 
@@ -71,7 +100,8 @@ def _hwaccel_decode_flags():
 
 
 def detect_movement(curr, prev, threshold):
-    diff = np.abs(curr.astype(np.int16) - prev.astype(np.int16))
+    xp = _get_xp(curr, prev)
+    diff = xp.abs(curr.astype(xp.int16) - prev.astype(xp.int16))
     return diff >= threshold
 
 
@@ -82,25 +112,27 @@ def update_idle_time(idle_time, moved):
 
 
 def hsv_to_rgb(h, s, v):
+    xp = _get_xp(h)
     c = v * s
     h6 = h * 6.0
-    x = c * (1.0 - np.abs((h6 % 2.0) - 1.0))
+    x = c * (1.0 - xp.abs((h6 % 2.0) - 1.0))
     m = v - c
 
-    z = np.zeros_like(h)
-    r = np.where(h6 < 1, c, np.where(h6 < 2, x, np.where(h6 < 4, z, np.where(h6 < 5, x, c))))
-    g = np.where(h6 < 1, x, np.where(h6 < 3, c, np.where(h6 < 4, x, z)))
-    b = np.where(h6 < 2, z, np.where(h6 < 3, x, np.where(h6 < 5, c, x)))
+    z = xp.zeros_like(h)
+    r = xp.where(h6 < 1, c, xp.where(h6 < 2, x, xp.where(h6 < 4, z, xp.where(h6 < 5, x, c))))
+    g = xp.where(h6 < 1, x, xp.where(h6 < 3, c, xp.where(h6 < 4, x, z)))
+    b = xp.where(h6 < 2, z, xp.where(h6 < 3, x, xp.where(h6 < 5, c, x)))
 
     r = (r + m) * 255.0
     g = (g + m) * 255.0
     b = (b + m) * 255.0
-    return np.stack([r, g, b], axis=2).astype(np.uint8)
+    return xp.stack([r, g, b], axis=2).astype(xp.uint8)
 
 
 def to_heatmap(idle_time, fade_frames):
     # Hue rotates across the color wheel as pixels age.
-    normalized = np.clip(idle_time / float(fade_frames), 0.0, 1.0)
+    xp = _get_xp(idle_time)
+    normalized = xp.clip(idle_time / float(fade_frames), 0.0, 1.0)
     hue = normalized
     value = 1.0 - normalized
     return hsv_to_rgb(hue, 1.0, value)
@@ -178,26 +210,27 @@ def process_frames_from_video(
         "-pix_fmt", "gray",
         "-",
     ]
+    xp = _xp(gpu)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     try:
         raw = proc.stdout.read(frame_bytes)
         if len(raw) != frame_bytes:
             raise SystemExit("Could not read first frame from video.")
-        prev = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
-        idle_time = np.zeros_like(prev, dtype=np.float32) + float(fade_frames)
+        prev = xp.asarray(np.frombuffer(raw, dtype=np.uint8).reshape((h, w)))
+        idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
 
         frame_idx = 1
         while True:
             data = proc.stdout.read(frame_bytes)
             if len(data) != frame_bytes:
                 break
-            curr = np.frombuffer(data, dtype=np.uint8).reshape((h, w))
+            curr = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
             moved = detect_movement(curr, prev, threshold)
             idle_time = update_idle_time(idle_time, moved)
             out = to_heatmap(idle_time, fade_frames)
             out_name = f"output_{frame_idx:0{pad_digits}d}.png"
             out_path = output_dir / out_name
-            Image.fromarray(out, mode="RGB").save(out_path)
+            Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
             if on_frame_done is not None:
                 on_frame_done(frame_idx, out_path)
             prev = curr
@@ -236,7 +269,13 @@ def process_frames(
 
     fade_frames = max(int(round(fade_seconds * fps)), 1)
     def load_frame(path):
-        return np.asarray(Image.open(path).convert("L"), dtype=np.uint8)
+        data = path.read_bytes()
+        offset = int.from_bytes(data[10:14], 'little')
+        w = int.from_bytes(data[18:22], 'little')
+        h = int.from_bytes(data[22:26], 'little')
+        stride = (w + 3) & ~3
+        pixels = np.frombuffer(data, dtype=np.uint8, offset=offset)
+        return pixels.reshape((h, stride))[:, :w][::-1]
 
     if input_mode == "ffmpeg" and step != 1:
         raise SystemExit("--input-mode ffmpeg requires --step 1.")
@@ -244,9 +283,12 @@ def process_frames(
     if io_workers < 1:
         raise SystemExit("--io-workers must be >= 1.")
 
+    xp = _xp(gpu)
+
     if input_mode == "ffmpeg":
-        sample = Image.open(frames[0]).convert("L")
-        w, h = sample.size
+        hdr = frames[0].read_bytes()[:26]
+        w = int.from_bytes(hdr[18:22], 'little')
+        h = int.from_bytes(hdr[22:26], 'little')
         pattern, _ = infer_sequence_pattern(frames[0])
         start_number = frame_key(frames[0])
         count = len(frames)
@@ -272,21 +314,21 @@ def process_frames(
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         try:
             frame_bytes = w * h
-            prev = np.frombuffer(proc.stdout.read(frame_bytes), dtype=np.uint8).reshape(
-                (h, w)
+            prev = xp.asarray(
+                np.frombuffer(proc.stdout.read(frame_bytes), dtype=np.uint8).reshape((h, w))
             )
-            idle_time = np.zeros_like(prev, dtype=np.float32) + float(fade_frames)
+            idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
             for frame_path in frames[1:]:
                 data = proc.stdout.read(frame_bytes)
                 if len(data) != frame_bytes:
                     raise SystemExit("ffmpeg stream ended early.")
-                curr = np.frombuffer(data, dtype=np.uint8).reshape((h, w))
+                curr = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
                 moved = detect_movement(curr, prev, threshold)
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
                 out_path = output_dir / out_name
-                Image.fromarray(out, mode="RGB").save(out_path)
+                Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
                     on_frame_done(frame_path, out_path)
                 prev = curr
@@ -302,15 +344,16 @@ def process_frames(
             iterator = executor.map(load_frame, frames)
 
         try:
-            prev = next(iterator)
-            idle_time = np.zeros_like(prev, dtype=np.float32) + float(fade_frames)
-            for frame_path, curr in zip(frames[1:], iterator):
+            prev = xp.asarray(next(iterator))
+            idle_time = xp.zeros_like(prev, dtype=xp.float32) + float(fade_frames)
+            for frame_path, curr_np in zip(frames[1:], iterator):
+                curr = xp.asarray(curr_np)
                 moved = detect_movement(curr, prev, threshold)
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
                 out_path = output_dir / out_name
-                Image.fromarray(out, mode="RGB").save(out_path)
+                Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
                     on_frame_done(frame_path, out_path)
                 prev = curr
