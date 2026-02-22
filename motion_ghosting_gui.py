@@ -9,7 +9,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 
+from PIL import Image, ImageTk
+
 from motion_ghosting import process_frames
+
+PREVIEW_WIDTH = 320
 
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────
@@ -159,6 +163,23 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(prog_frame, textvariable=self.status_var).pack(anchor="w", pady=(2, 0))
 
+        # ── Preview ───────────────────────────────────────────────────
+        preview_frame = ttk.LabelFrame(self, text="Preview", padding=8)
+        preview_frame.grid(row=row, column=0, sticky="ew", **pad)
+        row += 1
+
+        ttk.Label(preview_frame, text="Original").grid(row=0, column=0)
+        ttk.Label(preview_frame, text="Processed").grid(row=0, column=1)
+
+        self._orig_label = ttk.Label(preview_frame)
+        self._orig_label.grid(row=1, column=0, padx=(0, 4))
+        self._proc_label = ttk.Label(preview_frame)
+        self._proc_label.grid(row=1, column=1, padx=(4, 0))
+
+        # Keep references so PhotoImages aren't garbage-collected
+        self._orig_photo = None
+        self._proc_photo = None
+
         # ── Buttons ──────────────────────────────────────────────────
         btn_frame = ttk.Frame(self, padding=8)
         btn_frame.grid(row=row, column=0, sticky="e")
@@ -205,6 +226,32 @@ class App(tk.Tk):
 
     def _log(self, msg):
         self.after(0, self.status_var.set, msg)
+
+    def _update_preview(self, orig_path, proc_path):
+        """Load and display a pair of original / processed frames (called from main thread)."""
+        try:
+            orig_img = Image.open(orig_path).convert("RGB")
+            proc_img = Image.open(proc_path).convert("RGB")
+
+            # Scale both to the same preview width, preserving aspect ratio
+            w, h = orig_img.size
+            scale = PREVIEW_WIDTH / w
+            new_size = (PREVIEW_WIDTH, max(1, int(h * scale)))
+
+            orig_img = orig_img.resize(new_size, Image.LANCZOS)
+            proc_img = proc_img.resize(new_size, Image.LANCZOS)
+
+            self._orig_photo = ImageTk.PhotoImage(orig_img)
+            self._proc_photo = ImageTk.PhotoImage(proc_img)
+
+            self._orig_label.config(image=self._orig_photo)
+            self._proc_label.config(image=self._proc_photo)
+        except Exception:
+            pass  # non-critical — skip if image can't be loaded
+
+    def _on_frame_done(self, orig_path, proc_path):
+        """Callback invoked from worker thread; schedules preview update on main thread."""
+        self.after(0, self._update_preview, orig_path, proc_path)
 
     # ── Pipeline ──────────────────────────────────────────────────────
 
@@ -267,6 +314,7 @@ class App(tk.Tk):
                     pad_digits=6,
                     io_workers=workers,
                     input_mode=mode,
+                    on_frame_done=self._on_frame_done,
                 )
 
                 # Step 3 — stitch output video
