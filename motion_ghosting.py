@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +70,80 @@ def infer_sequence_pattern(path):
     return pattern, digits
 
 
+def _probe_video_dimensions(video_path):
+    """Return (width, height) of the first video stream using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            str(video_path),
+        ],
+        capture_output=True, text=True, timeout=15,
+    )
+    info = json.loads(result.stdout)
+    s = info["streams"][0]
+    return int(s["width"]), int(s["height"])
+
+
+def process_frames_from_video(
+    video_path,
+    output_dir,
+    threshold,
+    fps,
+    fade_seconds,
+    pad_digits,
+    on_frame_done=None,
+):
+    """Process a video file directly — no intermediate PNG extraction."""
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    w, h = _probe_video_dimensions(video_path)
+    fade_frames = max(int(round(fade_seconds * fps)), 1)
+    frame_bytes = w * h
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(video_path),
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "-",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    try:
+        raw = proc.stdout.read(frame_bytes)
+        if len(raw) != frame_bytes:
+            raise SystemExit("Could not read first frame from video.")
+        prev = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
+        idle_time = np.zeros_like(prev, dtype=np.float32) + float(fade_frames)
+
+        frame_idx = 1
+        while True:
+            data = proc.stdout.read(frame_bytes)
+            if len(data) != frame_bytes:
+                break
+            curr = np.frombuffer(data, dtype=np.uint8).reshape((h, w))
+            moved = detect_movement(curr, prev, threshold)
+            idle_time = update_idle_time(idle_time, moved)
+            out = to_heatmap(idle_time, fade_frames)
+            out_name = f"output_{frame_idx:0{pad_digits}d}.png"
+            out_path = output_dir / out_name
+            Image.fromarray(out, mode="RGB").save(out_path)
+            if on_frame_done is not None:
+                on_frame_done(frame_idx, out_path)
+            prev = curr
+            frame_idx += 1
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+        proc.wait()
+
+
 def process_frames(
     input_dir,
     output_dir,
@@ -81,6 +156,7 @@ def process_frames(
     pad_digits,
     io_workers,
     input_mode,
+    on_frame_done=None,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -142,7 +218,10 @@ def process_frames(
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
-                Image.fromarray(out, mode="RGB").save(output_dir / out_name)
+                out_path = output_dir / out_name
+                Image.fromarray(out, mode="RGB").save(out_path)
+                if on_frame_done is not None:
+                    on_frame_done(frame_path, out_path)
                 prev = curr
         finally:
             if proc.stdout:
@@ -163,7 +242,10 @@ def process_frames(
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
-                Image.fromarray(out, mode="RGB").save(output_dir / out_name)
+                out_path = output_dir / out_name
+                Image.fromarray(out, mode="RGB").save(out_path)
+                if on_frame_done is not None:
+                    on_frame_done(frame_path, out_path)
                 prev = curr
         finally:
             if io_workers != 1:

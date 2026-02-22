@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageTk
 
-from motion_ghosting import process_frames
+from motion_ghosting import process_frames, process_frames_from_video
 
 PREVIEW_WIDTH = 320
 
@@ -60,11 +60,15 @@ def _extract_frames(video_path, frames_dir, log):
 
 def _stitch_video(processed_dir, output_video, fps, log):
     """Stitch processed PNG frames → output video."""
-    log("Stitching output video…")
+    output_pngs = sorted(processed_dir.glob("output_*.png"))
+    if not output_pngs:
+        raise RuntimeError("No processed frames found — nothing to stitch.")
+    log(f"Stitching {len(output_pngs)} frames into output video…")
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-y",
         "-framerate", str(fps),
+        "-start_number", "1",
         "-i", str(processed_dir / "output_%06d.png"),
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
@@ -227,31 +231,32 @@ class App(tk.Tk):
     def _log(self, msg):
         self.after(0, self.status_var.set, msg)
 
-    def _update_preview(self, orig_path, proc_path):
-        """Load and display a pair of original / processed frames (called from main thread)."""
-        try:
-            orig_img = Image.open(orig_path).convert("RGB")
-            proc_img = Image.open(proc_path).convert("RGB")
+    def _update_preview(self, orig_path_or_idx, proc_path):
+        """Load and display a pair of original / processed frames (called from main thread).
 
-            # Scale both to the same preview width, preserving aspect ratio
-            w, h = orig_img.size
+        orig_path_or_idx is either a Path to the original frame (extract mode)
+        or a frame index int (direct pipe mode, no original on disk).
+        """
+        try:
+            proc_img = Image.open(proc_path).convert("RGB")
+            w, h = proc_img.size
             scale = PREVIEW_WIDTH / w
             new_size = (PREVIEW_WIDTH, max(1, int(h * scale)))
-
-            orig_img = orig_img.resize(new_size, Image.LANCZOS)
             proc_img = proc_img.resize(new_size, Image.LANCZOS)
-
-            self._orig_photo = ImageTk.PhotoImage(orig_img)
             self._proc_photo = ImageTk.PhotoImage(proc_img)
-
-            self._orig_label.config(image=self._orig_photo)
             self._proc_label.config(image=self._proc_photo)
+
+            if isinstance(orig_path_or_idx, (str, Path)):
+                orig_img = Image.open(orig_path_or_idx).convert("RGB")
+                orig_img = orig_img.resize(new_size, Image.LANCZOS)
+                self._orig_photo = ImageTk.PhotoImage(orig_img)
+                self._orig_label.config(image=self._orig_photo)
         except Exception:
             pass  # non-critical — skip if image can't be loaded
 
-    def _on_frame_done(self, orig_path, proc_path):
+    def _on_frame_done(self, orig_path_or_idx, proc_path):
         """Callback invoked from worker thread; schedules preview update on main thread."""
-        self.after(0, self._update_preview, orig_path, proc_path)
+        self.after(0, self._update_preview, orig_path_or_idx, proc_path)
 
     # ── Pipeline ──────────────────────────────────────────────────────
 
@@ -292,39 +297,51 @@ class App(tk.Tk):
         self.status_var.set("Starting…")
         self.progress.start(10)
 
+        # Use the fast direct-pipe path when no frame slicing is needed
+        use_direct = (start == 0 and end_val is None and step == 1)
+
         def worker():
             tmp = Path(tempfile.mkdtemp(prefix="glow_"))
-            frames_dir = tmp / "frames"
             processed_dir = tmp / "processed"
             try:
-                # Step 1 — extract frames
-                _extract_frames(input_video, frames_dir, self._log)
+                if use_direct:
+                    self._log("Processing video (direct pipe)…")
+                    process_frames_from_video(
+                        video_path=input_video,
+                        output_dir=str(processed_dir),
+                        threshold=threshold,
+                        fps=fps,
+                        fade_seconds=fade,
+                        pad_digits=6,
+                        on_frame_done=self._on_frame_done,
+                    )
+                else:
+                    # Fallback: extract to PNGs first (needed for start/end/step)
+                    frames_dir = tmp / "frames"
+                    _extract_frames(input_video, frames_dir, self._log)
+                    self._log("Processing frames…")
+                    process_frames(
+                        input_dir=str(frames_dir),
+                        output_dir=str(processed_dir),
+                        threshold=threshold,
+                        fps=fps,
+                        fade_seconds=fade,
+                        start=start,
+                        end=end_val,
+                        step=step,
+                        pad_digits=6,
+                        io_workers=workers,
+                        input_mode=mode,
+                        on_frame_done=self._on_frame_done,
+                    )
 
-                # Step 2 — process frames
-                self._log("Processing frames…")
-                process_frames(
-                    input_dir=str(frames_dir),
-                    output_dir=str(processed_dir),
-                    threshold=threshold,
-                    fps=fps,
-                    fade_seconds=fade,
-                    start=start,
-                    end=end_val,
-                    step=step,
-                    pad_digits=6,
-                    io_workers=workers,
-                    input_mode=mode,
-                    on_frame_done=self._on_frame_done,
-                )
-
-                # Step 3 — stitch output video
+                # Stitch output video
                 _stitch_video(processed_dir, output_video, fps, self._log)
 
                 self.after(0, self._done, None)
             except Exception as exc:
                 self.after(0, self._done, exc)
             finally:
-                # Clean up temp directory
                 shutil.rmtree(tmp, ignore_errors=True)
 
         threading.Thread(target=worker, daemon=True).start()
