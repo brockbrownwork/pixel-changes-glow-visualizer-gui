@@ -9,6 +9,67 @@ import numpy as np
 from PIL import Image
 
 
+# ── GPU / hwaccel helpers ────────────────────────────────────────────
+
+_hwaccel_cache = None
+
+
+def detect_hwaccel():
+    """Return the best available ffmpeg hwaccel method, or None."""
+    global _hwaccel_cache
+    if _hwaccel_cache is not None:
+        return _hwaccel_cache if _hwaccel_cache != "" else None
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True, text=True, timeout=10,
+        )
+        methods = result.stdout.strip().splitlines()[1:]  # skip header line
+        methods = [m.strip() for m in methods if m.strip()]
+        # prefer cuda > d3d11va > dxva2 > vaapi > videotoolbox > auto
+        for preferred in ("cuda", "d3d11va", "dxva2", "vaapi", "videotoolbox"):
+            if preferred in methods:
+                _hwaccel_cache = preferred
+                return preferred
+        _hwaccel_cache = ""
+        return None
+    except Exception:
+        _hwaccel_cache = ""
+        return None
+
+
+_gpu_encoder_cache = None
+
+
+def detect_gpu_encoder():
+    """Return the best available h264 GPU encoder, or 'libx264' as fallback."""
+    global _gpu_encoder_cache
+    if _gpu_encoder_cache is not None:
+        return _gpu_encoder_cache
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        text = result.stdout
+        for enc in ("h264_nvenc", "h264_amf", "h264_qsv"):
+            if enc in text:
+                _gpu_encoder_cache = enc
+                return enc
+    except Exception:
+        pass
+    _gpu_encoder_cache = "libx264"
+    return "libx264"
+
+
+def _hwaccel_decode_flags():
+    """Return ffmpeg input flags for hardware-accelerated decoding."""
+    method = detect_hwaccel()
+    if method:
+        return ["-hwaccel", method]
+    return []
+
+
 def detect_movement(curr, prev, threshold):
     diff = np.abs(curr.astype(np.int16) - prev.astype(np.int16))
     return diff >= threshold
@@ -95,6 +156,7 @@ def process_frames_from_video(
     fade_seconds,
     pad_digits,
     on_frame_done=None,
+    gpu=True,
 ):
     """Process a video file directly — no intermediate PNG extraction."""
     video_path = Path(video_path)
@@ -105,10 +167,12 @@ def process_frames_from_video(
     fade_frames = max(int(round(fade_seconds * fps)), 1)
     frame_bytes = w * h
 
+    hwaccel = _hwaccel_decode_flags() if gpu else []
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
+        *hwaccel,
         "-i", str(video_path),
         "-f", "rawvideo",
         "-pix_fmt", "gray",
@@ -157,6 +221,7 @@ def process_frames(
     io_workers,
     input_mode,
     on_frame_done=None,
+    gpu=True,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -185,11 +250,13 @@ def process_frames(
         pattern, _ = infer_sequence_pattern(frames[0])
         start_number = frame_key(frames[0])
         count = len(frames)
+        hwaccel = _hwaccel_decode_flags() if gpu else []
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
             "error",
+            *hwaccel,
             "-start_number",
             str(start_number),
             "-i",
@@ -294,11 +361,17 @@ def parse_args():
         help="End frame index (exclusive).",
     )
     parser.add_argument("--step", type=int, default=1, help="Process every Nth frame.")
+    parser.add_argument(
+        "--no-gpu",
+        action="store_true",
+        help="Disable GPU-accelerated ffmpeg decode/encode.",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    gpu = not args.no_gpu
     process_frames(
         args.input,
         args.output,
@@ -311,6 +384,7 @@ def main():
         args.pad_digits,
         args.io_workers,
         args.input_mode,
+        gpu=gpu,
     )
 
 

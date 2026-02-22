@@ -11,7 +11,13 @@ from pathlib import Path
 
 from PIL import Image, ImageTk
 
-from motion_ghosting import process_frames, process_frames_from_video
+from motion_ghosting import (
+    process_frames,
+    process_frames_from_video,
+    detect_hwaccel,
+    detect_gpu_encoder,
+    _hwaccel_decode_flags,
+)
 
 PREVIEW_WIDTH = 320
 
@@ -43,12 +49,14 @@ def _ffprobe_fps(video_path):
         return None
 
 
-def _extract_frames(video_path, frames_dir, log):
+def _extract_frames(video_path, frames_dir, log, gpu=True):
     """Extract video → PNG frames."""
     log("Extracting frames from video…")
     frames_dir.mkdir(parents=True, exist_ok=True)
+    hwaccel = _hwaccel_decode_flags() if gpu else []
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
+        *hwaccel,
         "-i", str(video_path),
         "-vsync", "0",
         str(frames_dir / "frame_%06d.png"),
@@ -58,19 +66,20 @@ def _extract_frames(video_path, frames_dir, log):
         raise RuntimeError(f"ffmpeg extract failed:\n{proc.stderr}")
 
 
-def _stitch_video(processed_dir, output_video, fps, log):
+def _stitch_video(processed_dir, output_video, fps, log, gpu=True):
     """Stitch processed PNG frames → output video."""
     output_pngs = sorted(processed_dir.glob("output_*.png"))
     if not output_pngs:
         raise RuntimeError("No processed frames found — nothing to stitch.")
-    log(f"Stitching {len(output_pngs)} frames into output video…")
+    encoder = detect_gpu_encoder() if gpu else "libx264"
+    log(f"Stitching {len(output_pngs)} frames ({encoder})…")
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-y",
         "-framerate", str(fps),
         "-start_number", "1",
         "-i", str(processed_dir / "output_%06d.png"),
-        "-c:v", "libx264",
+        "-c:v", encoder,
         "-pix_fmt", "yuv420p",
         str(output_video),
     ]
@@ -155,6 +164,18 @@ class App(tk.Tk):
             param_frame, text="Frame decode backend (ffmpeg requires step=1)",
             foreground="gray",
         ).grid(row=mode_row, column=2, sticky="w", padx=(8, 0))
+
+        gpu_row = mode_row + 1
+        self.gpu_var = tk.BooleanVar(value=True)
+        hwaccel = detect_hwaccel()
+        gpu_encoder = detect_gpu_encoder()
+        gpu_desc = f"Decode: {hwaccel or 'none'} | Encode: {gpu_encoder}"
+        ttk.Checkbutton(
+            param_frame, text="GPU acceleration", variable=self.gpu_var,
+        ).grid(row=gpu_row, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            param_frame, text=gpu_desc, foreground="gray",
+        ).grid(row=gpu_row, column=2, sticky="w", padx=(8, 0))
 
         # ── Progress ─────────────────────────────────────────────────
         prog_frame = ttk.Frame(self, padding=(8, 0, 8, 4))
@@ -289,6 +310,7 @@ class App(tk.Tk):
             start = self.start_var.get()
             step = self.step_var.get()
             mode = self.mode_var.get()
+            gpu = self.gpu_var.get()
         except tk.TclError:
             messagebox.showerror("Error", "Invalid parameter value — check your inputs.")
             return
@@ -314,11 +336,12 @@ class App(tk.Tk):
                         fade_seconds=fade,
                         pad_digits=6,
                         on_frame_done=self._on_frame_done,
+                        gpu=gpu,
                     )
                 else:
                     # Fallback: extract to PNGs first (needed for start/end/step)
                     frames_dir = tmp / "frames"
-                    _extract_frames(input_video, frames_dir, self._log)
+                    _extract_frames(input_video, frames_dir, self._log, gpu=gpu)
                     self._log("Processing frames…")
                     process_frames(
                         input_dir=str(frames_dir),
@@ -333,10 +356,11 @@ class App(tk.Tk):
                         io_workers=workers,
                         input_mode=mode,
                         on_frame_done=self._on_frame_done,
+                        gpu=gpu,
                     )
 
                 # Stitch output video
-                _stitch_video(processed_dir, output_video, fps, self._log)
+                _stitch_video(processed_dir, output_video, fps, self._log, gpu=gpu)
 
                 self.after(0, self._done, None)
             except Exception as exc:
