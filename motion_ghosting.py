@@ -227,7 +227,7 @@ def process_frames(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = sorted(input_dir.glob("*.png"), key=frame_key)
+    frames = sorted(input_dir.glob("*.bmp"), key=frame_key)
     if end is None:
         end = len(frames)
     frames = frames[start:end:step]

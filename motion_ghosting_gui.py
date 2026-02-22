@@ -50,7 +50,7 @@ def _ffprobe_fps(video_path):
 
 
 def _extract_frames(video_path, frames_dir, log, gpu=True):
-    """Extract video → PNG frames."""
+    """Extract video → BMP frames (uncompressed, faster writes)."""
     log("Extracting frames from video…")
     frames_dir.mkdir(parents=True, exist_ok=True)
     hwaccel = _hwaccel_decode_flags() if gpu else []
@@ -59,7 +59,7 @@ def _extract_frames(video_path, frames_dir, log, gpu=True):
         *hwaccel,
         "-i", str(video_path),
         "-vsync", "0",
-        str(frames_dir / "frame_%06d.png"),
+        str(frames_dir / "frame_%06d.bmp"),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
