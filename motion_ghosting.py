@@ -223,6 +223,7 @@ def process_frames_from_video(
     adjust_rate=0.5,
     min_thresh=2.0,
     max_thresh=200.0,
+    stop_event=None,
 ):
     """Process a video file directly — no intermediate PNG extraction."""
     video_path = Path(video_path)
@@ -272,6 +273,8 @@ def process_frames_from_video(
 
         frame_idx = 1
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             data = proc.stdout.read(frame_bytes)
             if len(data) != frame_bytes:
                 break
@@ -336,6 +339,7 @@ def process_frames(
     adjust_rate=0.5,
     min_thresh=2.0,
     max_thresh=200.0,
+    stop_event=None,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -414,6 +418,8 @@ def process_frames(
             else:
                 thresh_arr = threshold
             for frame_path in frames[1:]:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 data = proc.stdout.read(frame_bytes)
                 if len(data) != frame_bytes:
                     raise SystemExit("ffmpeg stream ended early.")
@@ -476,6 +482,8 @@ def process_frames(
             else:
                 thresh_arr = threshold
             for frame_path, curr_np in zip(frames[1:], iterator):
+                if stop_event is not None and stop_event.is_set():
+                    break
                 curr_raw = xp.asarray(curr_np)
                 if avg_window > 1:
                     f = curr_raw.astype(xp.float32)

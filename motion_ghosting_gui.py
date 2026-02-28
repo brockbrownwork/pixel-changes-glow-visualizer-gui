@@ -292,7 +292,10 @@ class App(tk.Tk):
 
         self.run_btn = ttk.Button(btn_frame, text="Run", command=self._on_run)
         self.run_btn.pack(side="right", padx=(4, 0))
-        ttk.Button(btn_frame, text="Quit", command=self.destroy).pack(side="right")
+        self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self._on_stop, state="disabled")
+        self.stop_btn.pack(side="right")
+
+        self._stop_event = threading.Event()
 
     # ── Helpers ───────────────────────────────────────────────────────
 
@@ -378,6 +381,11 @@ class App(tk.Tk):
 
     # ── Pipeline ──────────────────────────────────────────────────────
 
+    def _on_stop(self):
+        self._stop_event.set()
+        self.stop_btn.config(state="disabled")
+        self.status_var.set("Stopping…")
+
     def _on_run(self):
         input_video = self.input_var.get().strip()
         output_video = self.output_var.get().strip()
@@ -419,7 +427,9 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Invalid parameter value — check your inputs.")
             return
 
+        self._stop_event.clear()
         self.run_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
         self.status_var.set("Starting…")
         self.progress.start(10)
 
@@ -471,6 +481,7 @@ class App(tk.Tk):
                         adjust_rate=adjust_rate,
                         min_thresh=min_thresh,
                         max_thresh=max_thresh,
+                        stop_event=self._stop_event,
                     )
                 else:
                     # Fallback: extract to PNGs first (needed for start/end/step)
@@ -498,7 +509,12 @@ class App(tk.Tk):
                         adjust_rate=adjust_rate,
                         min_thresh=min_thresh,
                         max_thresh=max_thresh,
+                        stop_event=self._stop_event,
                     )
+
+                if self._stop_event.is_set():
+                    self.after(0, self._done, "stopped")
+                    return
 
                 # Stitch output video with processing parameters in metadata
                 _stitch_video(processed_dir, output_video, fps, self._log,
@@ -515,7 +531,10 @@ class App(tk.Tk):
     def _done(self, error):
         self.progress.stop()
         self.run_btn.config(state="normal")
-        if error:
+        self.stop_btn.config(state="disabled")
+        if error == "stopped":
+            self.status_var.set("Stopped.")
+        elif error:
             self.status_var.set("Error!")
             messagebox.showerror("Processing failed", str(error))
         else:
