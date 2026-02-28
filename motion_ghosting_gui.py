@@ -20,7 +20,7 @@ from motion_ghosting import (
     HAS_CUPY,
 )
 
-PREVIEW_WIDTH = 320
+PREVIEW_WIDTH = 640
 
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────
@@ -105,10 +105,18 @@ class App(tk.Tk):
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
+
+        # ── Two-column layout: controls left, previews right ─────────
+        left = ttk.Frame(self)
+        left.grid(row=0, column=0, sticky="nsew")
+        right = ttk.Frame(self)
+        right.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        self.columnconfigure(1, weight=1)
+
         row = 0
 
         # ── Input / Output ───────────────────────────────────────────
-        io_frame = ttk.LabelFrame(self, text="Input / Output", padding=8)
+        io_frame = ttk.LabelFrame(left, text="Input / Output", padding=8)
         io_frame.grid(row=row, column=0, sticky="ew", **pad)
         io_frame.columnconfigure(1, weight=1)
         row += 1
@@ -125,7 +133,7 @@ class App(tk.Tk):
         ttk.Button(io_frame, text="Browse…", command=self._browse_output).grid(row=1, column=2, pady=(4, 0))
 
         # ── Parameters ───────────────────────────────────────────────
-        param_frame = ttk.LabelFrame(self, text="Parameters", padding=8)
+        param_frame = ttk.LabelFrame(left, text="Parameters", padding=8)
         param_frame.grid(row=row, column=0, sticky="ew", **pad)
         row += 1
 
@@ -170,7 +178,7 @@ class App(tk.Tk):
         ).grid(row=mode_row, column=2, sticky="w", padx=(8, 0))
 
         # ── Fatigue / Adaptive Sensitivity ──────────────────────────────
-        fatigue_frame = ttk.LabelFrame(self, text="Pixel Fatigue (Adaptive Sensitivity)", padding=8)
+        fatigue_frame = ttk.LabelFrame(left, text="Pixel Fatigue (Adaptive Sensitivity)", padding=8)
         fatigue_frame.grid(row=row, column=0, sticky="ew", **pad)
         row += 1
 
@@ -220,7 +228,7 @@ class App(tk.Tk):
         ).grid(row=gpu_row, column=2, sticky="w", padx=(8, 0))
 
         # ── Progress ─────────────────────────────────────────────────
-        prog_frame = ttk.Frame(self, padding=(8, 0, 8, 4))
+        prog_frame = ttk.Frame(left, padding=(8, 0, 8, 4))
         prog_frame.grid(row=row, column=0, sticky="ew")
         row += 1
 
@@ -230,25 +238,24 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(prog_frame, textvariable=self.status_var).pack(anchor="w", pady=(2, 0))
 
-        # ── Preview ───────────────────────────────────────────────────
-        preview_frame = ttk.LabelFrame(self, text="Preview", padding=8)
-        preview_frame.grid(row=row, column=0, sticky="ew", **pad)
-        row += 1
+        # ── Preview (right column) ───────────────────────────────────
+        preview_frame = ttk.LabelFrame(right, text="Preview", padding=8)
+        preview_frame.pack(fill="both", expand=True)
 
-        ttk.Label(preview_frame, text="Original").grid(row=0, column=0)
-        ttk.Label(preview_frame, text="Processed").grid(row=0, column=1)
-
+        ttk.Label(preview_frame, text="Original").pack(anchor="w")
         self._orig_label = ttk.Label(preview_frame)
-        self._orig_label.grid(row=1, column=0, padx=(0, 4))
+        self._orig_label.pack(pady=(0, 8))
+
+        ttk.Label(preview_frame, text="Processed").pack(anchor="w")
         self._proc_label = ttk.Label(preview_frame)
-        self._proc_label.grid(row=1, column=1, padx=(4, 0))
+        self._proc_label.pack()
 
         # Keep references so PhotoImages aren't garbage-collected
         self._orig_photo = None
         self._proc_photo = None
 
         # ── Buttons ──────────────────────────────────────────────────
-        btn_frame = ttk.Frame(self, padding=8)
+        btn_frame = ttk.Frame(left, padding=8)
         btn_frame.grid(row=row, column=0, sticky="e")
 
         self.run_btn = ttk.Button(btn_frame, text="Run", command=self._on_run)
