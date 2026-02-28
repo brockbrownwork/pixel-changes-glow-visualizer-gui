@@ -137,12 +137,14 @@ class App(tk.Tk):
         self.start_var = tk.IntVar(value=0)
         self.end_var = tk.StringVar(value="")
         self.step_var = tk.IntVar(value=1)
+        self.avg_window_var = tk.IntVar(value=1)
 
         params = [
             ("Threshold:", self.threshold_var, "Movement detection sensitivity (0-255)"),
             ("FPS:", self.fps_var, "Auto-detected from video, or set manually"),
             ("Fade seconds:", self.fade_var, "Time for static pixels to fully fade"),
             ("IO workers:", self.workers_var, "Parallel image decode workers"),
+            ("Avg window:", self.avg_window_var, "Running average window size (1 = off)"),
             ("Start frame:", self.start_var, "Start frame index (inclusive)"),
             ("End frame:", self.end_var, "End frame index (exclusive, blank = all)"),
             ("Step:", self.step_var, "Process every Nth frame"),
@@ -167,6 +169,43 @@ class App(tk.Tk):
             foreground="gray",
         ).grid(row=mode_row, column=2, sticky="w", padx=(8, 0))
 
+        # ── Fatigue / Adaptive Sensitivity ──────────────────────────────
+        fatigue_frame = ttk.LabelFrame(self, text="Pixel Fatigue (Adaptive Sensitivity)", padding=8)
+        fatigue_frame.grid(row=row, column=0, sticky="ew", **pad)
+        row += 1
+
+        self.fatigue_var = tk.BooleanVar(value=True)
+        self.target_freq_var = tk.DoubleVar(value=1.0)
+        self.fatigue_tau_var = tk.DoubleVar(value=2.0)
+        self.adjust_rate_var = tk.DoubleVar(value=0.5)
+        self.min_thresh_var = tk.DoubleVar(value=2.0)
+        self.max_thresh_var = tk.DoubleVar(value=200.0)
+
+        ttk.Checkbutton(
+            fatigue_frame, text="Enable pixel fatigue", variable=self.fatigue_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            fatigue_frame,
+            text="Per-pixel adaptive threshold based on firing frequency",
+            foreground="gray",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        fatigue_params = [
+            ("Target freq (Hz):", self.target_freq_var, "Desired firings per second per pixel"),
+            ("Tau (seconds):", self.fatigue_tau_var, "EMA time constant — higher = slower adaptation"),
+            ("Adjust rate:", self.adjust_rate_var, "How aggressively thresholds shift"),
+            ("Min threshold:", self.min_thresh_var, "Floor — prevents infinite sensitivity"),
+            ("Max threshold:", self.max_thresh_var, "Ceiling — prevents total blindness"),
+        ]
+
+        for i, (label, var, tip) in enumerate(fatigue_params, start=1):
+            ttk.Label(fatigue_frame, text=label).grid(row=i, column=0, sticky="w")
+            ttk.Entry(fatigue_frame, textvariable=var, width=12).grid(row=i, column=1, padx=4)
+            ttk.Label(fatigue_frame, text=tip, foreground="gray").grid(
+                row=i, column=2, sticky="w", padx=(8, 0)
+            )
+
+        # ── GPU row (moved after fatigue frame) ─────────────────────────
         gpu_row = mode_row + 1
         self.gpu_var = tk.BooleanVar(value=True)
         hwaccel = detect_hwaccel()
@@ -255,11 +294,11 @@ class App(tk.Tk):
     def _log(self, msg):
         self.after(0, self.status_var.set, msg)
 
-    def _update_preview(self, orig_path_or_idx, proc_path):
+    def _update_preview(self, orig_path_or_img, proc_path):
         """Load and display a pair of original / processed frames (called from main thread).
 
-        orig_path_or_idx is either a Path to the original frame (extract mode)
-        or a frame index int (direct pipe mode, no original on disk).
+        orig_path_or_img is a Path to the original frame (extract mode),
+        a PIL Image (direct pipe mode), or a frame index int (legacy).
         """
         try:
             proc_img = Image.open(proc_path).convert("RGB")
@@ -270,8 +309,13 @@ class App(tk.Tk):
             self._proc_photo = ImageTk.PhotoImage(proc_img)
             self._proc_label.config(image=self._proc_photo)
 
-            if isinstance(orig_path_or_idx, (str, Path)):
-                orig_img = Image.open(orig_path_or_idx).convert("RGB")
+            if isinstance(orig_path_or_img, Image.Image):
+                orig_img = orig_path_or_img.convert("RGB")
+                orig_img = orig_img.resize(new_size, Image.LANCZOS)
+                self._orig_photo = ImageTk.PhotoImage(orig_img)
+                self._orig_label.config(image=self._orig_photo)
+            elif isinstance(orig_path_or_img, (str, Path)):
+                orig_img = Image.open(orig_path_or_img).convert("RGB")
                 orig_img = orig_img.resize(new_size, Image.LANCZOS)
                 self._orig_photo = ImageTk.PhotoImage(orig_img)
                 self._orig_label.config(image=self._orig_photo)
@@ -312,8 +356,15 @@ class App(tk.Tk):
             workers = self.workers_var.get()
             start = self.start_var.get()
             step = self.step_var.get()
+            avg_window = self.avg_window_var.get()
             mode = self.mode_var.get()
             gpu = self.gpu_var.get()
+            use_fatigue = self.fatigue_var.get()
+            target_freq = self.target_freq_var.get()
+            fatigue_tau = self.fatigue_tau_var.get()
+            adjust_rate = self.adjust_rate_var.get()
+            min_thresh = self.min_thresh_var.get()
+            max_thresh = self.max_thresh_var.get()
         except tk.TclError:
             messagebox.showerror("Error", "Invalid parameter value — check your inputs.")
             return
@@ -340,6 +391,13 @@ class App(tk.Tk):
                         pad_digits=6,
                         on_frame_done=self._on_frame_done,
                         gpu=gpu,
+                        avg_window=avg_window,
+                        fatigue=use_fatigue,
+                        target_freq=target_freq,
+                        fatigue_tau=fatigue_tau,
+                        adjust_rate=adjust_rate,
+                        min_thresh=min_thresh,
+                        max_thresh=max_thresh,
                     )
                 else:
                     # Fallback: extract to PNGs first (needed for start/end/step)
@@ -360,6 +418,13 @@ class App(tk.Tk):
                         input_mode=mode,
                         on_frame_done=self._on_frame_done,
                         gpu=gpu,
+                        avg_window=avg_window,
+                        fatigue=use_fatigue,
+                        target_freq=target_freq,
+                        fatigue_tau=fatigue_tau,
+                        adjust_rate=adjust_rate,
+                        min_thresh=min_thresh,
+                        max_thresh=max_thresh,
                     )
 
                 # Stitch output video

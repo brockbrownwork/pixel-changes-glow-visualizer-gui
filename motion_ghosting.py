@@ -1,5 +1,6 @@
 import argparse
 import json
+from collections import deque
 from pathlib import Path
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -111,6 +112,20 @@ def update_idle_time(idle_time, moved):
     return idle_time
 
 
+def update_fatigue(fire_freq, threshold, moved, fps,
+                   target_freq, tau, adjust_rate,
+                   min_thresh, max_thresh):
+    xp = _get_xp(fire_freq)
+    alpha = 1.0 - xp.exp(xp.float32(-1.0 / (tau * fps)))
+    fired = moved.astype(xp.float32)
+    fire_freq *= (1.0 - alpha)
+    fire_freq += fired * fps * alpha
+    error = fire_freq - target_freq
+    threshold += adjust_rate * error
+    xp.clip(threshold, min_thresh, max_thresh, out=threshold)
+    return fire_freq, threshold
+
+
 def hsv_to_rgb(h, s, v):
     xp = _get_xp(h)
     c = v * s
@@ -189,6 +204,13 @@ def process_frames_from_video(
     pad_digits,
     on_frame_done=None,
     gpu=True,
+    avg_window=1,
+    fatigue=True,
+    target_freq=1.0,
+    fatigue_tau=2.0,
+    adjust_rate=0.5,
+    min_thresh=2.0,
+    max_thresh=200.0,
 ):
     """Process a video file directly — no intermediate PNG extraction."""
     video_path = Path(video_path)
@@ -216,23 +238,56 @@ def process_frames_from_video(
         raw = proc.stdout.read(frame_bytes)
         if len(raw) != frame_bytes:
             raise SystemExit("Could not read first frame from video.")
-        prev = xp.asarray(np.frombuffer(raw, dtype=np.uint8).reshape((h, w)))
+        prev_raw = xp.asarray(np.frombuffer(raw, dtype=np.uint8).reshape((h, w)))
+
+        if avg_window > 1:
+            buf = deque(maxlen=avg_window)
+            rsum = xp.zeros((h, w), dtype=xp.float32)
+            f = prev_raw.astype(xp.float32)
+            buf.append(f)
+            rsum += f
+            prev = (rsum / len(buf)).astype(xp.uint8)
+        else:
+            prev = prev_raw
+
         idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
+
+        if fatigue:
+            thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
+            fire_freq = xp.zeros((h, w), dtype=xp.float32)
+        else:
+            thresh_arr = threshold
 
         frame_idx = 1
         while True:
             data = proc.stdout.read(frame_bytes)
             if len(data) != frame_bytes:
                 break
-            curr = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
-            moved = detect_movement(curr, prev, threshold)
+            curr_raw = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
+
+            if avg_window > 1:
+                f = curr_raw.astype(xp.float32)
+                if len(buf) == buf.maxlen:
+                    rsum -= buf[0]
+                buf.append(f)
+                rsum += f
+                curr = (rsum / len(buf)).astype(xp.uint8)
+            else:
+                curr = curr_raw
+
+            moved = detect_movement(curr, prev, thresh_arr)
+            if fatigue:
+                update_fatigue(fire_freq, thresh_arr, moved, fps,
+                               target_freq, fatigue_tau, adjust_rate,
+                               min_thresh, max_thresh)
             idle_time = update_idle_time(idle_time, moved)
             out = to_heatmap(idle_time, fade_frames)
             out_name = f"output_{frame_idx:0{pad_digits}d}.png"
             out_path = output_dir / out_name
             Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
             if on_frame_done is not None:
-                on_frame_done(frame_idx, out_path)
+                orig_img = Image.fromarray(_asnumpy(curr_raw), mode="L")
+                on_frame_done(orig_img, out_path)
             prev = curr
             frame_idx += 1
     finally:
@@ -255,6 +310,13 @@ def process_frames(
     input_mode,
     on_frame_done=None,
     gpu=True,
+    avg_window=1,
+    fatigue=True,
+    target_freq=1.0,
+    fatigue_tau=2.0,
+    adjust_rate=0.5,
+    min_thresh=2.0,
+    max_thresh=200.0,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -314,16 +376,43 @@ def process_frames(
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         try:
             frame_bytes = w * h
-            prev = xp.asarray(
+            prev_raw = xp.asarray(
                 np.frombuffer(proc.stdout.read(frame_bytes), dtype=np.uint8).reshape((h, w))
             )
+            if avg_window > 1:
+                buf = deque(maxlen=avg_window)
+                rsum = xp.zeros((h, w), dtype=xp.float32)
+                f = prev_raw.astype(xp.float32)
+                buf.append(f)
+                rsum += f
+                prev = (rsum / len(buf)).astype(xp.uint8)
+            else:
+                prev = prev_raw
             idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
+            if fatigue:
+                thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
+                fire_freq = xp.zeros((h, w), dtype=xp.float32)
+            else:
+                thresh_arr = threshold
             for frame_path in frames[1:]:
                 data = proc.stdout.read(frame_bytes)
                 if len(data) != frame_bytes:
                     raise SystemExit("ffmpeg stream ended early.")
-                curr = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
-                moved = detect_movement(curr, prev, threshold)
+                curr_raw = xp.asarray(np.frombuffer(data, dtype=np.uint8).reshape((h, w)))
+                if avg_window > 1:
+                    f = curr_raw.astype(xp.float32)
+                    if len(buf) == buf.maxlen:
+                        rsum -= buf[0]
+                    buf.append(f)
+                    rsum += f
+                    curr = (rsum / len(buf)).astype(xp.uint8)
+                else:
+                    curr = curr_raw
+                moved = detect_movement(curr, prev, thresh_arr)
+                if fatigue:
+                    update_fatigue(fire_freq, thresh_arr, moved, fps,
+                                   target_freq, fatigue_tau, adjust_rate,
+                                   min_thresh, max_thresh)
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
@@ -344,11 +433,38 @@ def process_frames(
             iterator = executor.map(load_frame, frames)
 
         try:
-            prev = xp.asarray(next(iterator))
-            idle_time = xp.zeros_like(prev, dtype=xp.float32) + float(fade_frames)
+            prev_raw = xp.asarray(next(iterator))
+            if avg_window > 1:
+                buf = deque(maxlen=avg_window)
+                rsum = xp.zeros_like(prev_raw, dtype=xp.float32)
+                f = prev_raw.astype(xp.float32)
+                buf.append(f)
+                rsum += f
+                prev = (rsum / len(buf)).astype(xp.uint8)
+            else:
+                prev = prev_raw
+            idle_time = xp.zeros_like(prev_raw, dtype=xp.float32) + float(fade_frames)
+            if fatigue:
+                thresh_arr = xp.full_like(prev_raw, float(threshold), dtype=xp.float32)
+                fire_freq = xp.zeros_like(prev_raw, dtype=xp.float32)
+            else:
+                thresh_arr = threshold
             for frame_path, curr_np in zip(frames[1:], iterator):
-                curr = xp.asarray(curr_np)
-                moved = detect_movement(curr, prev, threshold)
+                curr_raw = xp.asarray(curr_np)
+                if avg_window > 1:
+                    f = curr_raw.astype(xp.float32)
+                    if len(buf) == buf.maxlen:
+                        rsum -= buf[0]
+                    buf.append(f)
+                    rsum += f
+                    curr = (rsum / len(buf)).astype(xp.uint8)
+                else:
+                    curr = curr_raw
+                moved = detect_movement(curr, prev, thresh_arr)
+                if fatigue:
+                    update_fatigue(fire_freq, thresh_arr, moved, fps,
+                                   target_freq, fatigue_tau, adjust_rate,
+                                   min_thresh, max_thresh)
                 idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
@@ -405,9 +521,50 @@ def parse_args():
     )
     parser.add_argument("--step", type=int, default=1, help="Process every Nth frame.")
     parser.add_argument(
+        "--avg-window",
+        type=int,
+        default=1,
+        help="Running average window size (1 = off).",
+    )
+    parser.add_argument(
         "--no-gpu",
         action="store_true",
         help="Disable GPU-accelerated ffmpeg decode/encode.",
+    )
+    parser.add_argument(
+        "--no-fatigue",
+        action="store_true",
+        help="Disable per-pixel adaptive sensitivity.",
+    )
+    parser.add_argument(
+        "--target-freq",
+        type=float,
+        default=1.0,
+        help="Target firing rate per pixel in Hz (default 1.0).",
+    )
+    parser.add_argument(
+        "--fatigue-tau",
+        type=float,
+        default=2.0,
+        help="EMA time constant in seconds for frequency tracking (default 2.0).",
+    )
+    parser.add_argument(
+        "--adjust-rate",
+        type=float,
+        default=0.5,
+        help="How aggressively thresholds shift per frame (default 0.5).",
+    )
+    parser.add_argument(
+        "--min-thresh",
+        type=float,
+        default=2.0,
+        help="Minimum per-pixel threshold (default 2).",
+    )
+    parser.add_argument(
+        "--max-thresh",
+        type=float,
+        default=200.0,
+        help="Maximum per-pixel threshold (default 200).",
     )
     return parser.parse_args()
 
@@ -415,6 +572,7 @@ def parse_args():
 def main():
     args = parse_args()
     gpu = not args.no_gpu
+    use_fatigue = not args.no_fatigue
     process_frames(
         args.input,
         args.output,
@@ -428,6 +586,13 @@ def main():
         args.io_workers,
         args.input_mode,
         gpu=gpu,
+        avg_window=args.avg_window,
+        fatigue=use_fatigue,
+        target_freq=args.target_freq,
+        fatigue_tau=args.fatigue_tau,
+        adjust_rate=args.adjust_rate,
+        min_thresh=args.min_thresh,
+        max_thresh=args.max_thresh,
     )
 
 
