@@ -121,12 +121,15 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        # ── Two-column layout: controls left, previews right ─────────
+        # ── Three-column layout: controls | previews | diagnostics ────
         left = ttk.Frame(self)
         left.grid(row=0, column=0, sticky="nsew")
+        mid = ttk.Frame(self)
+        mid.grid(row=0, column=1, sticky="nsew", padx=(0, 4), pady=8)
         right = ttk.Frame(self)
-        right.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        right.grid(row=0, column=2, sticky="nsew", padx=(0, 8), pady=8)
         self.columnconfigure(1, weight=1)
+        self.columnconfigure(2, weight=1)
 
         row = 0
 
@@ -253,8 +256,8 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(prog_frame, textvariable=self.status_var).pack(anchor="w", pady=(2, 0))
 
-        # ── Preview (right column) ───────────────────────────────────
-        preview_frame = ttk.LabelFrame(right, text="Preview", padding=8)
+        # ── Preview (middle column) ──────────────────────────────────
+        preview_frame = ttk.LabelFrame(mid, text="Preview", padding=8)
         preview_frame.pack(fill="both", expand=True)
 
         ttk.Label(preview_frame, text="Original").pack(anchor="w")
@@ -265,9 +268,23 @@ class App(tk.Tk):
         self._proc_label = ttk.Label(preview_frame)
         self._proc_label.pack()
 
+        # ── Diagnostics (right column) ───────────────────────────────
+        diag_frame = ttk.LabelFrame(right, text="Diagnostics", padding=8)
+        diag_frame.pack(fill="both", expand=True)
+
+        ttk.Label(diag_frame, text="Sensitivity").pack(anchor="w")
+        self._sens_label = ttk.Label(diag_frame)
+        self._sens_label.pack(pady=(0, 8))
+
+        ttk.Label(diag_frame, text="Windowed Average").pack(anchor="w")
+        self._avg_label = ttk.Label(diag_frame)
+        self._avg_label.pack()
+
         # Keep references so PhotoImages aren't garbage-collected
         self._orig_photo = None
         self._proc_photo = None
+        self._sens_photo = None
+        self._avg_photo = None
 
         # ── Buttons ──────────────────────────────────────────────────
         btn_frame = ttk.Frame(left, padding=8)
@@ -316,11 +333,12 @@ class App(tk.Tk):
     def _log(self, msg):
         self.after(0, self.status_var.set, msg)
 
-    def _update_preview(self, orig_path_or_img, proc_path):
-        """Load and display a pair of original / processed frames (called from main thread).
+    def _update_preview(self, orig_path_or_img, proc_path, sens_img=None, avg_img=None):
+        """Load and display preview frames (called from main thread).
 
         orig_path_or_img is a Path to the original frame (extract mode),
         a PIL Image (direct pipe mode), or a frame index int (legacy).
+        sens_img / avg_img are optional PIL Images for the diagnostics column.
         """
         try:
             proc_img = Image.open(proc_path).convert("RGB")
@@ -341,12 +359,22 @@ class App(tk.Tk):
                 orig_img = orig_img.resize(new_size, Image.LANCZOS)
                 self._orig_photo = ImageTk.PhotoImage(orig_img)
                 self._orig_label.config(image=self._orig_photo)
+
+            if sens_img is not None:
+                sens_img = sens_img.resize(new_size, Image.LANCZOS)
+                self._sens_photo = ImageTk.PhotoImage(sens_img)
+                self._sens_label.config(image=self._sens_photo)
+
+            if avg_img is not None:
+                avg_img = avg_img.convert("RGB").resize(new_size, Image.LANCZOS)
+                self._avg_photo = ImageTk.PhotoImage(avg_img)
+                self._avg_label.config(image=self._avg_photo)
         except Exception:
             pass  # non-critical — skip if image can't be loaded
 
-    def _on_frame_done(self, orig_path_or_idx, proc_path):
+    def _on_frame_done(self, orig_path_or_idx, proc_path, sens_img=None, avg_img=None):
         """Callback invoked from worker thread; schedules preview update on main thread."""
-        self.after(0, self._update_preview, orig_path_or_idx, proc_path)
+        self.after(0, self._update_preview, orig_path_or_idx, proc_path, sens_img, avg_img)
 
     # ── Pipeline ──────────────────────────────────────────────────────
 

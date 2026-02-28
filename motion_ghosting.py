@@ -153,6 +153,18 @@ def to_heatmap(idle_time, fade_frames):
     return hsv_to_rgb(hue, 1.0, value)
 
 
+def threshold_to_heatmap(thresh_arr, min_thresh, max_thresh):
+    """Visualize per-pixel threshold as a heatmap (blue=sensitive → red=desensitized)."""
+    xp = _get_xp(thresh_arr)
+    normalized = xp.clip(
+        (thresh_arr - min_thresh) / (max_thresh - min_thresh), 0.0, 1.0
+    )
+    # hue 0.66 (blue, most sensitive) → 0.0 (red, most desensitized)
+    hue = (1.0 - normalized) * 0.66
+    ones = xp.ones_like(normalized)
+    return hsv_to_rgb(hue, ones, ones)
+
+
 def frame_key(path):
     match = re.search(r"(\d+)", path.stem)
     if match:
@@ -287,7 +299,14 @@ def process_frames_from_video(
             Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
             if on_frame_done is not None:
                 orig_img = Image.fromarray(_asnumpy(curr_raw), mode="L")
-                on_frame_done(orig_img, out_path)
+                sens_img = None
+                if fatigue:
+                    sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                    sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
+                avg_img = None
+                if avg_window > 1:
+                    avg_img = Image.fromarray(_asnumpy(curr), mode="L")
+                on_frame_done(orig_img, out_path, sens_img, avg_img)
             prev = curr
             frame_idx += 1
     finally:
@@ -419,7 +438,14 @@ def process_frames(
                 out_path = output_dir / out_name
                 Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
-                    on_frame_done(frame_path, out_path)
+                    sens_img = None
+                    if fatigue:
+                        sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                        sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
+                    avg_img = None
+                    if avg_window > 1:
+                        avg_img = Image.fromarray(_asnumpy(curr), mode="L")
+                    on_frame_done(frame_path, out_path, sens_img, avg_img)
                 prev = curr
         finally:
             if proc.stdout:
@@ -471,7 +497,14 @@ def process_frames(
                 out_path = output_dir / out_name
                 Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
-                    on_frame_done(frame_path, out_path)
+                    sens_img = None
+                    if fatigue:
+                        sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                        sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
+                    avg_img = None
+                    if avg_window > 1:
+                        avg_img = Image.fromarray(_asnumpy(curr), mode="L")
+                    on_frame_done(frame_path, out_path, sens_img, avg_img)
                 prev = curr
         finally:
             if io_workers != 1:
