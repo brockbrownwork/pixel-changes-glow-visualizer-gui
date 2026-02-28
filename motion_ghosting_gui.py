@@ -68,19 +68,34 @@ def _extract_frames(video_path, frames_dir, log, gpu=True):
         raise RuntimeError(f"ffmpeg extract failed:\n{proc.stderr}")
 
 
-def _stitch_video(processed_dir, output_video, fps, log, gpu=True):
-    """Stitch processed PNG frames → output video."""
+def _stitch_video(processed_dir, output_video, fps, log, gpu=True, metadata=None):
+    """Stitch processed PNG frames → output video.
+
+    *metadata* is an optional dict of processing parameters to embed in the
+    container.  Each key-value pair becomes an ffmpeg ``-metadata`` flag, and
+    the full dict is also stored as JSON in the ``comment`` field for easy
+    machine-readable access.
+    """
     output_pngs = sorted(processed_dir.glob("output_*.png"))
     if not output_pngs:
         raise RuntimeError("No processed frames found — nothing to stitch.")
     encoder = detect_gpu_encoder() if gpu else "libx264"
     log(f"Stitching {len(output_pngs)} frames ({encoder})…")
+
+    meta_flags = []
+    if metadata:
+        for key, val in metadata.items():
+            meta_flags += ["-metadata", f"{key}={val}"]
+        # Also store the full dict as JSON in the comment field
+        meta_flags += ["-metadata", f"comment={json.dumps(metadata)}"]
+
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-y",
         "-framerate", str(fps),
         "-start_number", "1",
         "-i", str(processed_dir / "output_%06d.png"),
+        *meta_flags,
         "-c:v", encoder,
         "-pix_fmt", "yuv420p",
         str(output_video),
@@ -383,6 +398,29 @@ class App(tk.Tk):
         # Use the fast direct-pipe path when no frame slicing is needed
         use_direct = (start == 0 and end_val is None and step == 1)
 
+        # Collect processing parameters for video metadata
+        metadata = {
+            "title": "Pixel Changes Glow Visualizer",
+            "threshold": str(threshold),
+            "fps": str(fps),
+            "fade_seconds": str(fade),
+            "avg_window": str(avg_window),
+            "start_frame": str(start),
+            "end_frame": str(end_val if end_val is not None else "all"),
+            "step": str(step),
+            "input_mode": mode,
+            "gpu": str(gpu),
+            "fatigue_enabled": str(use_fatigue),
+        }
+        if use_fatigue:
+            metadata.update({
+                "fatigue_target_freq": str(target_freq),
+                "fatigue_tau": str(fatigue_tau),
+                "fatigue_adjust_rate": str(adjust_rate),
+                "fatigue_min_thresh": str(min_thresh),
+                "fatigue_max_thresh": str(max_thresh),
+            })
+
         def worker():
             tmp = Path(tempfile.mkdtemp(prefix="glow_"))
             processed_dir = tmp / "processed"
@@ -434,8 +472,9 @@ class App(tk.Tk):
                         max_thresh=max_thresh,
                     )
 
-                # Stitch output video
-                _stitch_video(processed_dir, output_video, fps, self._log, gpu=gpu)
+                # Stitch output video with processing parameters in metadata
+                _stitch_video(processed_dir, output_video, fps, self._log,
+                              gpu=gpu, metadata=metadata)
 
                 self.after(0, self._done, None)
             except Exception as exc:
