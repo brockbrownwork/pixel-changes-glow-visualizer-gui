@@ -40,9 +40,16 @@ python motion_ghosting.py --input frames --output output --fps 60 --fade-seconds
 - `--io-workers`: parallel image decode workers
 - `--input-mode` (pil|ffmpeg): frame decoding backend
 
+### Dither Threshold
+
+Fixed random per-pixel threshold map generated once and held constant for the entire video. Each pixel gets its own random threshold drawn from `[threshold - range, threshold + range]`. Mutually exclusive with pixel fatigue.
+
+- GUI: "Enable dither" checkbox + "Range" field (default ±10)
+- `make_dither_map()` generates the random float32 array
+
 ### Pixel Fatigue (Adaptive Sensitivity)
 
-Per-pixel threshold that adjusts based on firing frequency. Noisy pixels desensitize; quiet pixels become more sensitive.
+Per-pixel threshold that adjusts based on firing frequency. Noisy pixels desensitize; quiet pixels become more sensitive. Mutually exclusive with dither threshold.
 
 - `--no-fatigue`: disable adaptive sensitivity (use fixed global threshold)
 - `--target-freq` (Hz): desired firing rate per pixel (default 1.0)

@@ -100,6 +100,13 @@ def _hwaccel_decode_flags():
     return []
 
 
+def make_dither_map(h, w, center, spread, xp=np):
+    """Create a fixed random threshold map for stochastic motion detection."""
+    low = max(0.0, center - spread)
+    high = min(255.0, center + spread)
+    return xp.random.uniform(low, high, (h, w)).astype(xp.float32)
+
+
 def detect_movement(curr, prev, threshold):
     xp = _get_xp(curr, prev)
     diff = xp.abs(curr.astype(xp.int16) - prev.astype(xp.int16))
@@ -224,6 +231,8 @@ def process_frames_from_video(
     min_thresh=2.0,
     max_thresh=200.0,
     stop_event=None,
+    dither=False,
+    dither_range=10.0,
 ):
     """Process a video file directly — no intermediate PNG extraction."""
     video_path = Path(video_path)
@@ -268,6 +277,8 @@ def process_frames_from_video(
         if fatigue:
             thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
             fire_freq = xp.zeros((h, w), dtype=xp.float32)
+        elif dither:
+            thresh_arr = make_dither_map(h, w, float(threshold), dither_range, xp)
         else:
             thresh_arr = threshold
 
@@ -303,8 +314,10 @@ def process_frames_from_video(
             if on_frame_done is not None:
                 orig_img = Image.fromarray(_asnumpy(curr_raw), mode="L")
                 sens_img = None
-                if fatigue:
-                    sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                if fatigue or dither:
+                    t_min = min_thresh if fatigue else float(threshold) - dither_range
+                    t_max = max_thresh if fatigue else float(threshold) + dither_range
+                    sens_data = threshold_to_heatmap(thresh_arr, t_min, t_max)
                     sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
                 avg_img = None
                 if avg_window > 1:
@@ -340,6 +353,8 @@ def process_frames(
     min_thresh=2.0,
     max_thresh=200.0,
     stop_event=None,
+    dither=False,
+    dither_range=10.0,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -415,6 +430,8 @@ def process_frames(
             if fatigue:
                 thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
                 fire_freq = xp.zeros((h, w), dtype=xp.float32)
+            elif dither:
+                thresh_arr = make_dither_map(h, w, float(threshold), dither_range, xp)
             else:
                 thresh_arr = threshold
             for frame_path in frames[1:]:
@@ -445,8 +462,10 @@ def process_frames(
                 Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
                     sens_img = None
-                    if fatigue:
-                        sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                    if fatigue or dither:
+                        t_min = min_thresh if fatigue else float(threshold) - dither_range
+                        t_max = max_thresh if fatigue else float(threshold) + dither_range
+                        sens_data = threshold_to_heatmap(thresh_arr, t_min, t_max)
                         sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
                     avg_img = None
                     if avg_window > 1:
@@ -479,6 +498,9 @@ def process_frames(
             if fatigue:
                 thresh_arr = xp.full_like(prev_raw, float(threshold), dtype=xp.float32)
                 fire_freq = xp.zeros_like(prev_raw, dtype=xp.float32)
+            elif dither:
+                ph, pw = prev_raw.shape[:2]
+                thresh_arr = make_dither_map(ph, pw, float(threshold), dither_range, xp)
             else:
                 thresh_arr = threshold
             for frame_path, curr_np in zip(frames[1:], iterator):
@@ -506,8 +528,10 @@ def process_frames(
                 Image.fromarray(_asnumpy(out), mode="RGB").save(out_path)
                 if on_frame_done is not None:
                     sens_img = None
-                    if fatigue:
-                        sens_data = threshold_to_heatmap(thresh_arr, min_thresh, max_thresh)
+                    if fatigue or dither:
+                        t_min = min_thresh if fatigue else float(threshold) - dither_range
+                        t_max = max_thresh if fatigue else float(threshold) + dither_range
+                        sens_data = threshold_to_heatmap(thresh_arr, t_min, t_max)
                         sens_img = Image.fromarray(_asnumpy(sens_data), mode="RGB")
                     avg_img = None
                     if avg_window > 1:

@@ -195,6 +195,33 @@ class App(tk.Tk):
             foreground="gray",
         ).grid(row=mode_row, column=2, sticky="w", padx=(8, 0))
 
+        # ── Dither Threshold ─────────────────────────────────────────────
+        dither_frame = ttk.LabelFrame(left, text="Dither Threshold", padding=8)
+        dither_frame.grid(row=row, column=0, sticky="ew", **pad)
+        row += 1
+
+        self.dither_var = tk.BooleanVar(value=False)
+        self.dither_range_var = tk.DoubleVar(value=10.0)
+
+        self._dither_check = ttk.Checkbutton(
+            dither_frame, text="Enable dither", variable=self.dither_var,
+            command=self._toggle_dither_fatigue,
+        )
+        self._dither_check.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            dither_frame,
+            text="Fixed random per-pixel threshold map",
+            foreground="gray",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(dither_frame, text="Range:").grid(row=1, column=0, sticky="w")
+        self._dither_range_entry = ttk.Entry(dither_frame, textvariable=self.dither_range_var, width=12)
+        self._dither_range_entry.grid(row=1, column=1, padx=4)
+        ttk.Label(
+            dither_frame, text="± spread around threshold center",
+            foreground="gray",
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0))
+
         # ── Fatigue / Adaptive Sensitivity ──────────────────────────────
         fatigue_frame = ttk.LabelFrame(left, text="Pixel Fatigue (Adaptive Sensitivity)", padding=8)
         fatigue_frame.grid(row=row, column=0, sticky="ew", **pad)
@@ -207,9 +234,11 @@ class App(tk.Tk):
         self.min_thresh_var = tk.DoubleVar(value=2.0)
         self.max_thresh_var = tk.DoubleVar(value=200.0)
 
-        ttk.Checkbutton(
+        self._fatigue_check = ttk.Checkbutton(
             fatigue_frame, text="Enable pixel fatigue", variable=self.fatigue_var,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+            command=self._toggle_dither_fatigue,
+        )
+        self._fatigue_check.grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(
             fatigue_frame,
             text="Per-pixel adaptive threshold based on firing frequency",
@@ -224,12 +253,15 @@ class App(tk.Tk):
             ("Max threshold:", self.max_thresh_var, "Ceiling — prevents total blindness"),
         ]
 
+        self._fatigue_widgets = []
         for i, (label, var, tip) in enumerate(fatigue_params, start=1):
-            ttk.Label(fatigue_frame, text=label).grid(row=i, column=0, sticky="w")
-            ttk.Entry(fatigue_frame, textvariable=var, width=12).grid(row=i, column=1, padx=4)
-            ttk.Label(fatigue_frame, text=tip, foreground="gray").grid(
-                row=i, column=2, sticky="w", padx=(8, 0)
-            )
+            lbl = ttk.Label(fatigue_frame, text=label)
+            lbl.grid(row=i, column=0, sticky="w")
+            entry = ttk.Entry(fatigue_frame, textvariable=var, width=12)
+            entry.grid(row=i, column=1, padx=4)
+            tip_lbl = ttk.Label(fatigue_frame, text=tip, foreground="gray")
+            tip_lbl.grid(row=i, column=2, sticky="w", padx=(8, 0))
+            self._fatigue_widgets.extend([lbl, entry, tip_lbl])
 
         # ── GPU row (moved after fatigue frame) ─────────────────────────
         gpu_row = mode_row + 1
@@ -298,6 +330,28 @@ class App(tk.Tk):
         self._stop_event = threading.Event()
 
     # ── Helpers ───────────────────────────────────────────────────────
+
+    def _toggle_dither_fatigue(self):
+        """Keep dither and fatigue mutually exclusive."""
+        if self.dither_var.get():
+            self.fatigue_var.set(False)
+            for w in self._fatigue_widgets:
+                w.state(["disabled"])
+            self._fatigue_check.state(["disabled"])
+            self._dither_range_entry.state(["!disabled"])
+        elif self.fatigue_var.get():
+            self.dither_var.set(False)
+            self._dither_range_entry.state(["disabled"])
+            self._dither_check.state(["disabled"])
+            for w in self._fatigue_widgets:
+                w.state(["!disabled"])
+        else:
+            # Neither checked — re-enable both checkboxes
+            self._dither_check.state(["!disabled"])
+            self._fatigue_check.state(["!disabled"])
+            self._dither_range_entry.state(["!disabled"])
+            for w in self._fatigue_widgets:
+                w.state(["!disabled"])
 
     def _center_window(self):
         self.update_idletasks()
@@ -423,6 +477,8 @@ class App(tk.Tk):
             adjust_rate = self.adjust_rate_var.get()
             min_thresh = self.min_thresh_var.get()
             max_thresh = self.max_thresh_var.get()
+            use_dither = self.dither_var.get()
+            dither_range = self.dither_range_var.get()
         except tk.TclError:
             messagebox.showerror("Error", "Invalid parameter value — check your inputs.")
             return
@@ -449,7 +505,10 @@ class App(tk.Tk):
             "input_mode": mode,
             "gpu": str(gpu),
             "fatigue_enabled": str(use_fatigue),
+            "dither_enabled": str(use_dither),
         }
+        if use_dither:
+            metadata["dither_range"] = str(dither_range)
         if use_fatigue:
             metadata.update({
                 "fatigue_target_freq": str(target_freq),
@@ -482,6 +541,8 @@ class App(tk.Tk):
                         min_thresh=min_thresh,
                         max_thresh=max_thresh,
                         stop_event=self._stop_event,
+                        dither=use_dither,
+                        dither_range=dither_range,
                     )
                 else:
                     # Fallback: extract to PNGs first (needed for start/end/step)
@@ -510,6 +571,8 @@ class App(tk.Tk):
                         min_thresh=min_thresh,
                         max_thresh=max_thresh,
                         stop_event=self._stop_event,
+                        dither=use_dither,
+                        dither_range=dither_range,
                     )
 
                 if self._stop_event.is_set():
