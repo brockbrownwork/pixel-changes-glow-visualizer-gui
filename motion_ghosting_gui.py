@@ -205,7 +205,7 @@ class App(tk.Tk):
 
         self._dither_check = ttk.Checkbutton(
             dither_frame, text="Enable dither", variable=self.dither_var,
-            command=self._toggle_dither_fatigue,
+            command=self._toggle_threshold_mode,
         )
         self._dither_check.grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(
@@ -219,6 +219,33 @@ class App(tk.Tk):
         self._dither_range_entry.grid(row=1, column=1, padx=4)
         ttk.Label(
             dither_frame, text="± spread around threshold center",
+            foreground="gray",
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0))
+
+        # ── ReLU Threshold ──────────────────────────────────────────────
+        relu_frame = ttk.LabelFrame(left, text="ReLU Threshold", padding=8)
+        relu_frame.grid(row=row, column=0, sticky="ew", **pad)
+        row += 1
+
+        self.relu_var = tk.BooleanVar(value=False)
+        self.relu_max_var = tk.DoubleVar(value=50.0)
+
+        self._relu_check = ttk.Checkbutton(
+            relu_frame, text="Enable ReLU threshold", variable=self.relu_var,
+            command=self._toggle_threshold_mode,
+        )
+        self._relu_check.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            relu_frame,
+            text="Glow duration proportional to excess change",
+            foreground="gray",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(relu_frame, text="Max excess:").grid(row=1, column=0, sticky="w")
+        self._relu_max_entry = ttk.Entry(relu_frame, textvariable=self.relu_max_var, width=12)
+        self._relu_max_entry.grid(row=1, column=1, padx=4)
+        ttk.Label(
+            relu_frame, text="Excess above threshold for full glow duration",
             foreground="gray",
         ).grid(row=1, column=2, sticky="w", padx=(8, 0))
 
@@ -236,7 +263,7 @@ class App(tk.Tk):
 
         self._fatigue_check = ttk.Checkbutton(
             fatigue_frame, text="Enable pixel fatigue", variable=self.fatigue_var,
-            command=self._toggle_dither_fatigue,
+            command=self._toggle_threshold_mode,
         )
         self._fatigue_check.grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(
@@ -331,27 +358,41 @@ class App(tk.Tk):
 
     # ── Helpers ───────────────────────────────────────────────────────
 
-    def _toggle_dither_fatigue(self):
-        """Keep dither and fatigue mutually exclusive."""
-        if self.dither_var.get():
+    def _toggle_threshold_mode(self):
+        """Keep dither, ReLU, and fatigue mutually exclusive."""
+        dither = self.dither_var.get()
+        relu = self.relu_var.get()
+        fatigue = self.fatigue_var.get()
+
+        # Determine which one was just checked (at most one active)
+        if dither:
             self.fatigue_var.set(False)
-            for w in self._fatigue_widgets:
-                w.state(["disabled"])
-            self._fatigue_check.state(["disabled"])
-            self._dither_range_entry.state(["!disabled"])
-        elif self.fatigue_var.get():
+            self.relu_var.set(False)
+        elif relu:
+            self.fatigue_var.set(False)
             self.dither_var.set(False)
-            self._dither_range_entry.state(["disabled"])
-            self._dither_check.state(["disabled"])
-            for w in self._fatigue_widgets:
-                w.state(["!disabled"])
-        else:
-            # Neither checked — re-enable both checkboxes
-            self._dither_check.state(["!disabled"])
-            self._fatigue_check.state(["!disabled"])
-            self._dither_range_entry.state(["!disabled"])
-            for w in self._fatigue_widgets:
-                w.state(["!disabled"])
+        elif fatigue:
+            self.dither_var.set(False)
+            self.relu_var.set(False)
+
+        # Re-read after enforcing exclusivity
+        dither = self.dither_var.get()
+        relu = self.relu_var.get()
+        fatigue = self.fatigue_var.get()
+        active = dither or relu or fatigue
+
+        # Dither controls
+        self._dither_check.state(["!disabled"] if not active or dither else ["disabled"])
+        self._dither_range_entry.state(["!disabled"] if not active or dither else ["disabled"])
+
+        # ReLU controls
+        self._relu_check.state(["!disabled"] if not active or relu else ["disabled"])
+        self._relu_max_entry.state(["!disabled"] if not active or relu else ["disabled"])
+
+        # Fatigue controls
+        self._fatigue_check.state(["!disabled"] if not active or fatigue else ["disabled"])
+        for w in self._fatigue_widgets:
+            w.state(["!disabled"] if not active or fatigue else ["disabled"])
 
     def _center_window(self):
         self.update_idletasks()
@@ -479,6 +520,8 @@ class App(tk.Tk):
             max_thresh = self.max_thresh_var.get()
             use_dither = self.dither_var.get()
             dither_range = self.dither_range_var.get()
+            use_relu = self.relu_var.get()
+            relu_max = self.relu_max_var.get()
         except tk.TclError:
             messagebox.showerror("Error", "Invalid parameter value — check your inputs.")
             return
@@ -506,9 +549,12 @@ class App(tk.Tk):
             "gpu": str(gpu),
             "fatigue_enabled": str(use_fatigue),
             "dither_enabled": str(use_dither),
+            "relu_enabled": str(use_relu),
         }
         if use_dither:
             metadata["dither_range"] = str(dither_range)
+        if use_relu:
+            metadata["relu_max"] = str(relu_max)
         if use_fatigue:
             metadata.update({
                 "fatigue_target_freq": str(target_freq),
@@ -543,6 +589,8 @@ class App(tk.Tk):
                         stop_event=self._stop_event,
                         dither=use_dither,
                         dither_range=dither_range,
+                        relu=use_relu,
+                        relu_max=relu_max,
                     )
                 else:
                     # Fallback: extract to PNGs first (needed for start/end/step)
@@ -573,6 +621,8 @@ class App(tk.Tk):
                         stop_event=self._stop_event,
                         dither=use_dither,
                         dither_range=dither_range,
+                        relu=use_relu,
+                        relu_max=relu_max,
                     )
 
                 if self._stop_event.is_set():

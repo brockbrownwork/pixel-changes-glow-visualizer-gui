@@ -42,14 +42,23 @@ python motion_ghosting.py --input frames --output output --fps 60 --fade-seconds
 
 ### Dither Threshold
 
-Fixed random per-pixel threshold map generated once and held constant for the entire video. Each pixel gets its own random threshold drawn from `[threshold - range, threshold + range]`. Mutually exclusive with pixel fatigue.
+Fixed random per-pixel threshold map generated once and held constant for the entire video. Each pixel gets its own random threshold drawn from `[threshold - range, threshold + range]`. Mutually exclusive with ReLU and fatigue.
 
 - GUI: "Enable dither" checkbox + "Range" field (default ±10)
 - `make_dither_map()` generates the random float32 array
 
+### ReLU Threshold
+
+Glow duration proportional to excess change above threshold (like a ReLU activation). Below threshold: no glow. Above threshold: glow duration scales linearly with `(diff - threshold)` up to a configurable max. Mutually exclusive with dither and fatigue.
+
+- `--relu`: enable ReLU threshold mode
+- `--relu-max` (default 50): excess value at which glow reaches full fade duration
+- `detect_movement_relu()` returns both the moved mask and per-pixel idle_time reset values
+- `update_idle_time_relu()` sets idle_time proportionally instead of always resetting to 0
+
 ### Pixel Fatigue (Adaptive Sensitivity)
 
-Per-pixel threshold that adjusts based on firing frequency. Noisy pixels desensitize; quiet pixels become more sensitive. Mutually exclusive with dither threshold.
+Per-pixel threshold that adjusts based on firing frequency. Noisy pixels desensitize; quiet pixels become more sensitive. Mutually exclusive with dither and ReLU threshold.
 
 - `--no-fatigue`: disable adaptive sensitivity (use fixed global threshold)
 - `--target-freq` (Hz): desired firing rate per pixel (default 1.0)

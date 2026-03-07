@@ -119,6 +119,22 @@ def update_idle_time(idle_time, moved):
     return idle_time
 
 
+def detect_movement_relu(curr, prev, threshold, relu_max, fade_frames):
+    xp = _get_xp(curr, prev)
+    diff = xp.abs(curr.astype(xp.int16) - prev.astype(xp.int16)).astype(xp.float32)
+    excess = diff - float(threshold)
+    moved = excess >= 0
+    glow_ratio = xp.clip(excess / float(relu_max), 0.0, 1.0)
+    reset_value = float(fade_frames) * (1.0 - glow_ratio)
+    return moved, reset_value
+
+
+def update_idle_time_relu(idle_time, moved, reset_value):
+    idle_time[moved] = reset_value[moved]
+    idle_time[~moved] += 1.0
+    return idle_time
+
+
 def update_fatigue(fire_freq, threshold, moved, fps,
                    target_freq, tau, adjust_rate,
                    min_thresh, max_thresh):
@@ -233,6 +249,8 @@ def process_frames_from_video(
     stop_event=None,
     dither=False,
     dither_range=10.0,
+    relu=False,
+    relu_max=50.0,
 ):
     """Process a video file directly — no intermediate PNG extraction."""
     video_path = Path(video_path)
@@ -274,7 +292,9 @@ def process_frames_from_video(
 
         idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
 
-        if fatigue:
+        if relu:
+            thresh_arr = threshold
+        elif fatigue:
             thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
             fire_freq = xp.zeros((h, w), dtype=xp.float32)
         elif dither:
@@ -301,12 +321,17 @@ def process_frames_from_video(
             else:
                 curr = curr_raw
 
-            moved = detect_movement(curr, prev, thresh_arr)
-            if fatigue:
-                update_fatigue(fire_freq, thresh_arr, moved, fps,
-                               target_freq, fatigue_tau, adjust_rate,
-                               min_thresh, max_thresh)
-            idle_time = update_idle_time(idle_time, moved)
+            if relu:
+                moved, reset_value = detect_movement_relu(
+                    curr, prev, thresh_arr, relu_max, fade_frames)
+                idle_time = update_idle_time_relu(idle_time, moved, reset_value)
+            else:
+                moved = detect_movement(curr, prev, thresh_arr)
+                if fatigue:
+                    update_fatigue(fire_freq, thresh_arr, moved, fps,
+                                   target_freq, fatigue_tau, adjust_rate,
+                                   min_thresh, max_thresh)
+                idle_time = update_idle_time(idle_time, moved)
             out = to_heatmap(idle_time, fade_frames)
             out_name = f"output_{frame_idx:0{pad_digits}d}.png"
             out_path = output_dir / out_name
@@ -355,6 +380,8 @@ def process_frames(
     stop_event=None,
     dither=False,
     dither_range=10.0,
+    relu=False,
+    relu_max=50.0,
 ):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -427,7 +454,9 @@ def process_frames(
             else:
                 prev = prev_raw
             idle_time = xp.zeros((h, w), dtype=xp.float32) + float(fade_frames)
-            if fatigue:
+            if relu:
+                thresh_arr = threshold
+            elif fatigue:
                 thresh_arr = xp.full((h, w), float(threshold), dtype=xp.float32)
                 fire_freq = xp.zeros((h, w), dtype=xp.float32)
             elif dither:
@@ -450,12 +479,17 @@ def process_frames(
                     curr = (rsum / len(buf)).astype(xp.uint8)
                 else:
                     curr = curr_raw
-                moved = detect_movement(curr, prev, thresh_arr)
-                if fatigue:
-                    update_fatigue(fire_freq, thresh_arr, moved, fps,
-                                   target_freq, fatigue_tau, adjust_rate,
-                                   min_thresh, max_thresh)
-                idle_time = update_idle_time(idle_time, moved)
+                if relu:
+                    moved, reset_value = detect_movement_relu(
+                        curr, prev, thresh_arr, relu_max, fade_frames)
+                    idle_time = update_idle_time_relu(idle_time, moved, reset_value)
+                else:
+                    moved = detect_movement(curr, prev, thresh_arr)
+                    if fatigue:
+                        update_fatigue(fire_freq, thresh_arr, moved, fps,
+                                       target_freq, fatigue_tau, adjust_rate,
+                                       min_thresh, max_thresh)
+                    idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
                 out_path = output_dir / out_name
@@ -495,7 +529,9 @@ def process_frames(
             else:
                 prev = prev_raw
             idle_time = xp.zeros_like(prev_raw, dtype=xp.float32) + float(fade_frames)
-            if fatigue:
+            if relu:
+                thresh_arr = threshold
+            elif fatigue:
                 thresh_arr = xp.full_like(prev_raw, float(threshold), dtype=xp.float32)
                 fire_freq = xp.zeros_like(prev_raw, dtype=xp.float32)
             elif dither:
@@ -516,12 +552,17 @@ def process_frames(
                     curr = (rsum / len(buf)).astype(xp.uint8)
                 else:
                     curr = curr_raw
-                moved = detect_movement(curr, prev, thresh_arr)
-                if fatigue:
-                    update_fatigue(fire_freq, thresh_arr, moved, fps,
-                                   target_freq, fatigue_tau, adjust_rate,
-                                   min_thresh, max_thresh)
-                idle_time = update_idle_time(idle_time, moved)
+                if relu:
+                    moved, reset_value = detect_movement_relu(
+                        curr, prev, thresh_arr, relu_max, fade_frames)
+                    idle_time = update_idle_time_relu(idle_time, moved, reset_value)
+                else:
+                    moved = detect_movement(curr, prev, thresh_arr)
+                    if fatigue:
+                        update_fatigue(fire_freq, thresh_arr, moved, fps,
+                                       target_freq, fatigue_tau, adjust_rate,
+                                       min_thresh, max_thresh)
+                    idle_time = update_idle_time(idle_time, moved)
                 out = to_heatmap(idle_time, fade_frames)
                 out_name = output_name(frame_path, pad_digits)
                 out_path = output_dir / out_name
@@ -631,13 +672,24 @@ def parse_args():
         default=200.0,
         help="Maximum per-pixel threshold (default 200).",
     )
+    parser.add_argument(
+        "--relu",
+        action="store_true",
+        help="Enable ReLU threshold: glow duration proportional to excess change.",
+    )
+    parser.add_argument(
+        "--relu-max",
+        type=float,
+        default=50.0,
+        help="Excess above threshold that maps to full glow duration (default 50).",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     gpu = not args.no_gpu
-    use_fatigue = not args.no_fatigue
+    use_fatigue = not args.no_fatigue and not args.relu
     process_frames(
         args.input,
         args.output,
@@ -658,6 +710,8 @@ def main():
         adjust_rate=args.adjust_rate,
         min_thresh=args.min_thresh,
         max_thresh=args.max_thresh,
+        relu=args.relu,
+        relu_max=args.relu_max,
     )
 
 
